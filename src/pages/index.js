@@ -1,172 +1,127 @@
 import { useState } from "react";
+import { saveAs } from "file-saver";
 import JSZip from "jszip";
+import { parseStringPromise, Builder } from "xml2js";
 
-export default function Page() {
-  const [file, setFile] = useState(null);
+export default function Home() {
+  const [fields, setFields] = useState({});
+  const [fieldOrder, setFieldOrder] = useState([]);
   const [fileName, setFileName] = useState("");
-  const [placeholders, setPlaceholders] = useState([]);
-  const [values, setValues] = useState({});
+  const [zipFile, setZipFile] = useState(null);
 
-  // Extrae placeholders del texto con regex
-  function extractPlaceholders(text) {
-    const regex = /{{(.*?)}}/g;
-    const matches = new Set();
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      matches.add(match[1].trim());
-    }
-    return Array.from(matches);
-  }
-
-  // Lee todos los archivos relevantes para extraer placeholders
-  async function processFile(file) {
-    const arrayBuffer = await file.arrayBuffer();
-    const zip = await JSZip.loadAsync(arrayBuffer);
-
-    let allPlaceholders = new Set();
-
-    // Función helper para extraer placeholders y unirlos
-    async function extractFromFile(filename) {
-      if (!zip.file(filename)) return;
-      const content = await zip.file(filename).async("string");
-      extractPlaceholders(content).forEach((ph) => allPlaceholders.add(ph));
-    }
-
-    // Extraer del documento principal
-    await extractFromFile("word/document.xml");
-
-    // Extraer de todos los headers (header1.xml, header2.xml, ...)
-    Object.keys(zip.files).forEach(async (filename) => {
-      if (filename.startsWith("word/header") && filename.endsWith(".xml")) {
-        await extractFromFile(filename);
-      }
-    });
-
-    // Extraer de todos los footers (footer1.xml, footer2.xml, ...)
-    Object.keys(zip.files).forEach(async (filename) => {
-      if (filename.startsWith("word/footer") && filename.endsWith(".xml")) {
-        await extractFromFile(filename);
-      }
-    });
-
-    // Esperar un poco para que terminen las llamadas asíncronas (simplificación)
-    // Mejor usar un Promise.all para los headers/footers, aquí lo hacemos simple
-    await new Promise((r) => setTimeout(r, 500));
-
-    const phArray = Array.from(allPlaceholders);
-    setPlaceholders(phArray);
-
-    // Inicializa los valores vacíos o con el mismo nombre
-    const initialValues = {};
-    phArray.forEach((ph) => {
-      initialValues[ph] = "";
-    });
-    setValues(initialValues);
-  }
-
-  function handleFileChange(e) {
-    const uploadedFile = e.target.files[0];
-    setFile(uploadedFile);
-    setFileName(uploadedFile.name);
-    setPlaceholders([]);
-    setValues({});
-    processFile(uploadedFile);
-  }
-
-  function handleInputChange(e) {
-    const { name, value } = e.target;
-    setValues((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
-  }
-
-  // Reemplaza placeholders en un texto con los valores
-  function replacePlaceholders(text, replacements) {
-    return text.replace(/{{(.*?)}}/g, (_, key) => {
-      const k = key.trim();
-      return replacements[k] !== undefined ? replacements[k] : `{{${k}}}`;
-    });
-  }
-
-  async function handleDownload() {
-    if (!file) {
-      alert("Sube un archivo primero.");
-      return;
-    }
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
     const arrayBuffer = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(arrayBuffer);
+    setZipFile(zip);
+    setFileName(file.name);
 
-    // Reemplazo en document.xml
-    if (zip.file("word/document.xml")) {
-      const documentXml = await zip.file("word/document.xml").async("string");
-      zip.file("word/document.xml", replacePlaceholders(documentXml, values));
+    const xml = await zip.file("word/document.xml").async("text");
+    extractFieldsFromXml(xml);
+  };
+
+  const extractFieldsFromXml = async (xml) => {
+    const parsed = await parseStringPromise(xml);
+    const body = parsed["w:document"]["w:body"][0];
+
+    let textRuns = [];
+
+    const extractText = (node) => {
+      if (typeof node !== "object") return;
+      for (const key in node) {
+        if (Array.isArray(node[key])) {
+          node[key].forEach((item) => {
+            if (key === "w:t") {
+              if (typeof item === "string") {
+                textRuns.push(item);
+              } else if (item._) {
+                textRuns.push(item._);
+              }
+            } else {
+              extractText(item);
+            }
+          });
+        }
+      }
+    };
+
+    extractText(body);
+
+    const fullText = textRuns.join("");
+    const regex = /{{\s*([^{}]+?)\s*}}/g;
+    const matches = [...fullText.matchAll(regex)];
+
+    let detectedFields = {};
+    let ordered = [];
+
+    matches.forEach((match) => {
+      const key = match[1].trim();
+      if (key && !(key in detectedFields)) {
+        detectedFields[key] = "";
+        ordered.push(key);
+      }
+    });
+
+    setFields(detectedFields);
+    setFieldOrder(ordered);
+  };
+
+  const handleFieldChange = (key, value) => {
+    setFields((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleDownload = async () => {
+    if (!zipFile) return;
+
+    const xml = await zipFile.file("word/document.xml").async("text");
+    let modifiedXml = xml;
+
+    for (const [key, value] of Object.entries(fields)) {
+      const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
+      modifiedXml = modifiedXml.replace(regex, value);
     }
 
-    // Reemplazo en headers y footers
-    const replacePromises = Object.keys(zip.files)
-      .filter(
-        (filename) =>
-          (filename.startsWith("word/header") || filename.startsWith("word/footer")) &&
-          filename.endsWith(".xml")
-      )
-      .map(async (filename) => {
-        const content = await zip.file(filename).async("string");
-        const replaced = replacePlaceholders(content, values);
-        zip.file(filename, replaced);
-      });
+    const zipClone = await JSZip.loadAsync(await zipFile.generateAsync({ type: "arraybuffer" }));
+    zipClone.file("word/document.xml", modifiedXml);
 
-    await Promise.all(replacePromises);
-
-    const newZipContent = await zip.generateAsync({ type: "blob" });
-
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(newZipContent);
-    a.download = `reemplazado_${fileName}`;
-    a.click();
-  }
+    const modifiedDoc = await zipClone.generateAsync({ type: "blob" });
+    saveAs(modifiedDoc, `modificado-${fileName}`);
+  };
 
   return (
-    <main className="p-8 max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">Reemplazo automático en DOCX</h1>
-
+    <main className="p-4 max-w-xl mx-auto">
+      <h1 className="text-xl font-bold mb-4">Reemplazo de campos en .docx</h1>
       <input type="file" accept=".docx" onChange={handleFileChange} />
-      {fileName && <p className="text-sm text-gray-600">Archivo cargado: {fileName}</p>}
 
-      {placeholders.length > 0 && (
-        <>
-          <h2 className="font-semibold mt-6 mb-2">Campos detectados:</h2>
-          <form>
-            {placeholders.map((ph) => (
-              <div key={ph} className="mb-2">
-                <label htmlFor={ph} className="block font-medium text-sm mb-1">
-                  {ph}
-                </label>
-                <input
-                  type="text"
-                  id={ph}
-                  name={ph}
-                  value={values[ph]}
-                  onChange={handleInputChange}
-                  className="border rounded px-2 py-1 w-full"
-                />
-              </div>
-            ))}
-          </form>
-        </>
+      {fieldOrder.length > 0 && (
+        <div className="mt-4 space-y-2">
+          {fieldOrder.map((key) => (
+            <div key={key}>
+              <label className="block text-sm font-semibold">{key}</label>
+              <input
+                type="text"
+                value={fields[key]}
+                onChange={(e) => handleFieldChange(key, e.target.value)}
+                className="w-full border p-2 rounded"
+              />
+            </div>
+          ))}
+          <button
+            onClick={handleDownload}
+            className="mt-4 bg-blue-600 text-white px-4 py-2 rounded"
+          >
+            Descargar documento reemplazado
+          </button>
+        </div>
       )}
 
-      <button
-        onClick={handleDownload}
-        className="mt-4 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
-      >
-        Descargar archivo modificado
-      </button>
-
-      <p className="mt-4 text-xs text-gray-500">
-        Este sistema detecta automáticamente los campos entre llaves como <code>{`{{campo}}`}</code> y los reemplaza.
-      </p>
+      {fieldOrder.length === 0 && fileName && (
+        <p className="mt-4 text-sm text-gray-500">
+          No se detectaron campos <code>{"{{campo}}"}</code> en el documento.
+        </p>
+      )}
     </main>
   );
 }
