@@ -26,21 +26,16 @@ export default function Home() {
     const parsed = await parseStringPromise(xml);
     const body = parsed["w:document"]["w:body"][0];
 
-    let fullText = "";
-    const placeholders = [];
-    const textNodes = [];
-
+    let allText = "";
     const walk = (node) => {
       if (typeof node !== "object") return;
-
       for (const key in node) {
         if (Array.isArray(node[key])) {
           node[key].forEach((child) => {
             if (key === "w:t") {
               const value = typeof child === "string" ? child : child._;
               if (value) {
-                textNodes.push({ node: child, value });
-                fullText += value;
+                allText += value;
               }
             } else {
               walk(child);
@@ -53,7 +48,7 @@ export default function Home() {
     walk(body);
 
     const regex = /{{\s*([^{}]+?)\s*}}/g;
-    const matches = [...fullText.matchAll(regex)];
+    const matches = [...allText.matchAll(regex)];
 
     const detectedFields = {};
     const ordered = [];
@@ -81,48 +76,52 @@ export default function Home() {
     const parsed = await parseStringPromise(xml);
     const body = parsed["w:document"]["w:body"][0];
 
-    let buffer = "";
-    const bufferNodes = [];
-
-    const process = (node) => {
+    const replacePlaceholdersInTextNodes = (node) => {
       if (typeof node !== "object") return;
 
       for (const key in node) {
         if (Array.isArray(node[key])) {
-          node[key].forEach((child) => {
-            if (key === "w:t") {
-              const text = typeof child === "string" ? child : child._;
-              if (text) {
-                buffer += text;
-                bufferNodes.push({ parent: child, text });
+          for (let i = 0; i < node[key].length; i++) {
+            const run = node[key][i];
+            if (run["w:t"]) {
+              // Buscar secuencia de nodos con texto consecutivos
+              const texts = [];
+              const indexes = [];
+
+              let j = i;
+              while (j < node[key].length && node[key][j]["w:t"]) {
+                const txt = node[key][j]["w:t"][0];
+                texts.push(typeof txt === "string" ? txt : txt._ ?? "");
+                indexes.push(j);
+
+                const combined = texts.join("");
+                const match = combined.match(/{{\s*([^{}]+?)\s*}}/);
+                if (match) {
+                  const fieldName = match[1].trim();
+                  const replacement = fields[fieldName] ?? "";
+
+                  // Reemplazar en primer nodo
+                  node[key][indexes[0]]["w:t"][0]._ = replacement;
+
+                  // Borrar los otros textos
+                  for (let z = 1; z < indexes.length; z++) {
+                    delete node[key][indexes[z]]["w:t"];
+                  }
+
+                  break; // salir después de reemplazar
+                }
+
+                j++;
               }
             } else {
-              process(child);
+              replacePlaceholdersInTextNodes(run);
             }
-          });
+          }
         }
       }
     };
 
-    process(body);
-
-    let replaced = buffer;
-    for (const [key, value] of Object.entries(fields)) {
-      const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
-      replaced = replaced.replace(regex, value);
-    }
-
-    // Redistribute replaced text into original nodes
-    let offset = 0;
-    bufferNodes.forEach(({ parent, text }) => {
-      const newText = replaced.slice(offset, offset + text.length);
-      if (typeof parent === "string") {
-        parent = newText;
-      } else {
-        parent._ = newText;
-      }
-      offset += text.length;
-    });
+    replacePlaceholdersInTextNodes(body);
 
     const builder = new Builder();
     const newXml = builder.buildObject(parsed);
@@ -144,8 +143,8 @@ export default function Home() {
           {fieldOrder.map((key) => (
             <div key={key}>
               <label className="block text-sm font-semibold">{key}</label>
-              <input
-                type="text"
+              <textarea
+                rows={2}
                 value={fields[key]}
                 onChange={(e) => handleFieldChange(key, e.target.value)}
                 className="w-full border p-2 rounded"
