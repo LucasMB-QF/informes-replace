@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { saveAs } from "file-saver";
 import JSZip from "jszip";
-import { parseStringPromise } from "xml2js";
+import { parseStringPromise, Builder } from "xml2js";
 
 export default function Home() {
   const [fields, setFields] = useState({});
@@ -26,35 +26,37 @@ export default function Home() {
     const parsed = await parseStringPromise(xml);
     const body = parsed["w:document"]["w:body"][0];
 
-    let textRuns = [];
+    let fullText = "";
+    const placeholders = [];
+    const textNodes = [];
 
-    const extractText = (node) => {
+    const walk = (node) => {
       if (typeof node !== "object") return;
+
       for (const key in node) {
         if (Array.isArray(node[key])) {
-          node[key].forEach((item) => {
+          node[key].forEach((child) => {
             if (key === "w:t") {
-              if (typeof item === "string") {
-                textRuns.push(item);
-              } else if (item._) {
-                textRuns.push(item._);
+              const value = typeof child === "string" ? child : child._;
+              if (value) {
+                textNodes.push({ node: child, value });
+                fullText += value;
               }
             } else {
-              extractText(item);
+              walk(child);
             }
           });
         }
       }
     };
 
-    extractText(body);
+    walk(body);
 
-    const fullText = textRuns.join("");
     const regex = /{{\s*([^{}]+?)\s*}}/g;
     const matches = [...fullText.matchAll(regex)];
 
-    let detectedFields = {};
-    let ordered = [];
+    const detectedFields = {};
+    const ordered = [];
 
     matches.forEach((match) => {
       const key = match[1].trim();
@@ -75,35 +77,61 @@ export default function Home() {
   const handleDownload = async () => {
     if (!zipFile) return;
 
-    const zipClone = await JSZip.loadAsync(await zipFile.generateAsync({ type: "arraybuffer" }));
+    const xml = await zipFile.file("word/document.xml").async("text");
+    const parsed = await parseStringPromise(xml);
+    const body = parsed["w:document"]["w:body"][0];
 
-    const replaceFieldsInXml = (xmlText) => {
-      let result = xmlText;
-      for (const [key, value] of Object.entries(fields)) {
-        const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
-        result = result.replace(regex, value);
+    let buffer = "";
+    const bufferNodes = [];
+
+    const process = (node) => {
+      if (typeof node !== "object") return;
+
+      for (const key in node) {
+        if (Array.isArray(node[key])) {
+          node[key].forEach((child) => {
+            if (key === "w:t") {
+              const text = typeof child === "string" ? child : child._;
+              if (text) {
+                buffer += text;
+                bufferNodes.push({ parent: child, text });
+              }
+            } else {
+              process(child);
+            }
+          });
+        }
       }
-      return result;
     };
 
-    // Reemplazar en document.xml
-    const documentXml = await zipFile.file("word/document.xml").async("text");
-    const newDocumentXml = replaceFieldsInXml(documentXml);
-    zipClone.file("word/document.xml", newDocumentXml);
+    process(body);
 
-    // Reemplazar en headers
-    const headerFiles = Object.keys(zipFile.files).filter((f) =>
-      /^word\/header\d+\.xml$/.test(f)
-    );
-
-    for (const headerPath of headerFiles) {
-      const headerXml = await zipFile.file(headerPath).async("text");
-      const newHeaderXml = replaceFieldsInXml(headerXml);
-      zipClone.file(headerPath, newHeaderXml);
+    let replaced = buffer;
+    for (const [key, value] of Object.entries(fields)) {
+      const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
+      replaced = replaced.replace(regex, value);
     }
 
-    const modifiedDoc = await zipClone.generateAsync({ type: "blob" });
-    saveAs(modifiedDoc, `modificado-${fileName}`);
+    // Redistribute replaced text into original nodes
+    let offset = 0;
+    bufferNodes.forEach(({ parent, text }) => {
+      const newText = replaced.slice(offset, offset + text.length);
+      if (typeof parent === "string") {
+        parent = newText;
+      } else {
+        parent._ = newText;
+      }
+      offset += text.length;
+    });
+
+    const builder = new Builder();
+    const newXml = builder.buildObject(parsed);
+
+    const zipClone = await JSZip.loadAsync(await zipFile.generateAsync({ type: "arraybuffer" }));
+    zipClone.file("word/document.xml", newXml);
+    const blob = await zipClone.generateAsync({ type: "blob" });
+
+    saveAs(blob, `modificado-${fileName}`);
   };
 
   return (
@@ -116,8 +144,8 @@ export default function Home() {
           {fieldOrder.map((key) => (
             <div key={key}>
               <label className="block text-sm font-semibold">{key}</label>
-              <input
-                type="text"
+              <textarea
+                rows={4}
                 value={fields[key]}
                 onChange={(e) => handleFieldChange(key, e.target.value)}
                 className="w-full border p-2 rounded"
