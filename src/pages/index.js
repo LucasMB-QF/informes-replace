@@ -144,8 +144,8 @@ export default function Home() {
           {fieldOrder.map((key) => (
             <div key={key}>
               <label className="block text-sm font-semibold">{key}</label>
-              <textarea
-                rows={4}
+              <input
+                type="text"
                 value={fields[key]}
                 onChange={(e) => handleFieldChange(key, e.target.value)}
                 className="w-full border p-2 rounded"
