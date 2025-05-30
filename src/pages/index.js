@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { saveAs } from "file-saver";
 import JSZip from "jszip";
-import { parseStringPromise, Builder } from "xml2js";
+import { parseStringPromise } from "xml2js";
 
 export default function Home() {
   const [fields, setFields] = useState({});
@@ -75,16 +75,32 @@ export default function Home() {
   const handleDownload = async () => {
     if (!zipFile) return;
 
-    const xml = await zipFile.file("word/document.xml").async("text");
-    let modifiedXml = xml;
-
-    for (const [key, value] of Object.entries(fields)) {
-      const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
-      modifiedXml = modifiedXml.replace(regex, value);
-    }
-
     const zipClone = await JSZip.loadAsync(await zipFile.generateAsync({ type: "arraybuffer" }));
-    zipClone.file("word/document.xml", modifiedXml);
+
+    const replaceFieldsInXml = (xmlText) => {
+      let result = xmlText;
+      for (const [key, value] of Object.entries(fields)) {
+        const regex = new RegExp(`{{\\s*${key}\\s*}}`, "g");
+        result = result.replace(regex, value);
+      }
+      return result;
+    };
+
+    // Reemplazar en document.xml
+    const documentXml = await zipFile.file("word/document.xml").async("text");
+    const newDocumentXml = replaceFieldsInXml(documentXml);
+    zipClone.file("word/document.xml", newDocumentXml);
+
+    // Reemplazar en headers
+    const headerFiles = Object.keys(zipFile.files).filter((f) =>
+      /^word\/header\d+\.xml$/.test(f)
+    );
+
+    for (const headerPath of headerFiles) {
+      const headerXml = await zipFile.file(headerPath).async("text");
+      const newHeaderXml = replaceFieldsInXml(headerXml);
+      zipClone.file(headerPath, newHeaderXml);
+    }
 
     const modifiedDoc = await zipClone.generateAsync({ type: "blob" });
     saveAs(modifiedDoc, `modificado-${fileName}`);
