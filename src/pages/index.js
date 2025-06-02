@@ -1,68 +1,76 @@
-import { useState } from "react";
-import mammoth from "mammoth";
-import { saveAs } from "file-saver";
-import { generateDocx } from "../utils/docxConverter";
+'use client';
+
+import { useState } from 'react';
+import mammoth from 'mammoth';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
 
 export default function Home() {
-  const [file, setFile] = useState(null);
-  const [text, setText] = useState("");
-  const [placeholders, setPlaceholders] = useState({
-    patente: "",
-    dl01: "",
-    // agrega más campos que necesites reemplazar
-  });
+  const [fields, setFields] = useState({});
+  const [docxFile, setDocxFile] = useState(null);
 
-  // Cuando suben el archivo, leer texto con mammoth
-  const handleFileChange = async (e) => {
-    const file = e.target.files[0];
-    setFile(file);
+  const handleFileChange = async (event) => {
+    const file = event.target.files[0];
+    setDocxFile(file);
 
     const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-    setText(result.value);
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const documentXml = await zip.file("word/document.xml").async("string");
+
+    const matches = [...documentXml.matchAll(/\{\{(.*?)\}\}/g)];
+    const uniqueFields = [...new Set(matches.map(m => m[1].trim()))];
+
+    const fieldsObj = {};
+    uniqueFields.forEach(field => {
+      fieldsObj[field] = '';
+    });
+
+    setFields(fieldsObj);
   };
 
-  // Reemplazar en el texto todos los campos {{clave}} con valores del formulario
-  const handleReplace = () => {
-    let replacedText = text;
-    for (const key in placeholders) {
-      const regex = new RegExp(`{{${key}}}`, "g");
-      replacedText = replacedText.replace(regex, placeholders[key]);
+  const handleChange = (e, key) => {
+    setFields({ ...fields, [key]: e.target.value });
+  };
+
+  const handleDownload = async () => {
+    const arrayBuffer = await docxFile.arrayBuffer();
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    let documentXml = await zip.file("word/document.xml").async("string");
+
+    for (const key in fields) {
+      const regex = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'g');
+      documentXml = documentXml.replace(regex, fields[key]);
     }
-    setText(replacedText);
-  };
 
-  // Generar nuevo docx con el texto reemplazado
-  const handleDownload = () => {
-    const docxBlob = generateDocx(text);
-    saveAs(docxBlob, "informe_reemplazado.docx");
+    zip.file("word/document.xml", documentXml);
+    const newBlob = await zip.generateAsync({ type: "blob" });
+    saveAs(newBlob, "reemplazado.docx");
   };
 
   return (
-    <div style={{ padding: 20 }}>
-      <h1>Reemplazador de informes DOCX</h1>
+    <main className="p-4 max-w-xl mx-auto">
+      <h1 className="text-2xl font-bold mb-4">Reemplazo de campos en DOCX</h1>
       <input type="file" accept=".docx" onChange={handleFileChange} />
-      <div style={{ marginTop: 20 }}>
-        {Object.keys(placeholders).map((key) => (
-          <div key={key} style={{ marginBottom: 10 }}>
-            <label>
-              {key}:{" "}
+      {Object.keys(fields).length > 0 && (
+        <div className="mt-4 space-y-2">
+          {Object.entries(fields).map(([key, value]) => (
+            <div key={key}>
+              <label className="block text-sm font-medium">{key}</label>
               <input
-                type="text"
-                value={placeholders[key]}
-                onChange={(e) =>
-                  setPlaceholders({ ...placeholders, [key]: e.target.value })
-                }
+                className="w-full p-2 border border-gray-300 rounded"
+                value={value}
+                onChange={(e) => handleChange(e, key)}
               />
-            </label>
-          </div>
-        ))}
-      </div>
-      <button onClick={handleReplace}>Reemplazar campos</button>
-      <button onClick={handleDownload} style={{ marginLeft: 10 }}>
-        Descargar informe reemplazado
-      </button>
-      <pre style={{ whiteSpace: "pre-wrap", marginTop: 20 }}>{text}</pre>
-    </div>
+            </div>
+          ))}
+          <button
+            onClick={handleDownload}
+            className="mt-4 px-4 py-2 bg-blue-500 text-white rounded"
+          >
+            Descargar DOCX reemplazado
+          </button>
+        </div>
+      )}
+    </main>
   );
 }
