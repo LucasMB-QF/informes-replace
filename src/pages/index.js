@@ -1,63 +1,68 @@
-const handleFileChange = async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+import { useState } from "react";
+import mammoth from "mammoth";
+import { saveAs } from "file-saver";
+import { generateDocx } from "../utils/docxConverter";
 
-  const arrayBuffer = await file.arrayBuffer();
-  const zip = await JSZip.loadAsync(arrayBuffer);
-  setZipFile(zip);
-  setFileName(file.name);
-
-  let fullText = "";
-  const targetFiles = ["word/document.xml"];
-
-  // Obtener los nombres de los encabezados
-  const headerFiles = zip.folder("word").file(/header[0-9]*\.xml/);
-  headerFiles.forEach((h) => targetFiles.push(h.name));
-
-  for (const filePath of targetFiles) {
-    const fileEntry = zip.file(filePath);
-    if (!fileEntry) continue;
-
-    const xml = await fileEntry.async("text");
-    const parsed = await parseStringPromise(xml);
-
-    const body = parsed["w:document"]?.["w:body"]?.[0] || parsed["w:hdr"];
-    const textRuns = [];
-
-    const extractText = (node) => {
-      if (typeof node !== "object") return;
-      for (const key in node) {
-        if (Array.isArray(node[key])) {
-          node[key].forEach((item) => {
-            if (key === "w:t") {
-              if (typeof item === "string") textRuns.push(item);
-              else if (item._) textRuns.push(item._);
-            } else {
-              extractText(item);
-            }
-          });
-        }
-      }
-    };
-
-    extractText(body);
-    fullText += textRuns.join("");
-  }
-
-  const regex = /{{\s*([^{}]+?)\s*}}/g;
-  const matches = [...fullText.matchAll(regex)];
-
-  const detectedFields = {};
-  const ordered = [];
-
-  matches.forEach((match) => {
-    const key = match[1].trim();
-    if (key && !(key in detectedFields)) {
-      detectedFields[key] = "";
-      ordered.push(key);
-    }
+export default function Home() {
+  const [file, setFile] = useState(null);
+  const [text, setText] = useState("");
+  const [placeholders, setPlaceholders] = useState({
+    patente: "",
+    dl01: "",
+    // agrega más campos que necesites reemplazar
   });
 
-  setFields(detectedFields);
-  setFieldOrder(ordered);
-};
+  // Cuando suben el archivo, leer texto con mammoth
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    setFile(file);
+
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    setText(result.value);
+  };
+
+  // Reemplazar en el texto todos los campos {{clave}} con valores del formulario
+  const handleReplace = () => {
+    let replacedText = text;
+    for (const key in placeholders) {
+      const regex = new RegExp(`{{${key}}}`, "g");
+      replacedText = replacedText.replace(regex, placeholders[key]);
+    }
+    setText(replacedText);
+  };
+
+  // Generar nuevo docx con el texto reemplazado
+  const handleDownload = () => {
+    const docxBlob = generateDocx(text);
+    saveAs(docxBlob, "informe_reemplazado.docx");
+  };
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h1>Reemplazador de informes DOCX</h1>
+      <input type="file" accept=".docx" onChange={handleFileChange} />
+      <div style={{ marginTop: 20 }}>
+        {Object.keys(placeholders).map((key) => (
+          <div key={key} style={{ marginBottom: 10 }}>
+            <label>
+              {key}:{" "}
+              <input
+                type="text"
+                value={placeholders[key]}
+                onChange={(e) =>
+                  setPlaceholders({ ...placeholders, [key]: e.target.value })
+                }
+              />
+            </label>
+          </div>
+        ))}
+      </div>
+      <button onClick={handleReplace}>Reemplazar campos</button>
+      <button onClick={handleDownload} style={{ marginLeft: 10 }}>
+        Descargar informe reemplazado
+      </button>
+      <pre style={{ whiteSpace: "pre-wrap", marginTop: 20 }}>{text}</pre>
+    </div>
+  );
+}
